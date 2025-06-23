@@ -1,0 +1,17 @@
+# Core dependencies for reel maker (OpenCV version - no MoviePy!)
+gradio>=4.44.0
+openai-whisper>=20231117
+opencv-python>=4.8.0
+soundfile>=0.12.1
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Audio processing
+librosa>=0.10.0
+
+# FFmpeg interface (for audio combining)
+ffmpeg-python>=0.2.0
+
+# Optional: For GPU acceleration (uncomment if you have CUDA)
+# torch>=2.0.0
+# torchaudio>=2.0.0
