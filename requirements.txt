@@ -1,17 +1,46 @@
-# Core dependencies for reel maker (OpenCV version - no MoviePy!)
-gradio>=4.44.0
-openai-whisper>=20231117
-opencv-python>=4.8.0
-soundfile>=0.12.1
-numpy>=1.24.0
-Pillow>=10.0.0
+# Professional Reel Maker with Reddit Integration
+# Complete requirements for CUDA 11.8 environment
 
-# Audio processing
-librosa>=0.10.0
+# Core PyTorch with CUDA 11.8 support
+torch==2.0.1+cu118
+torchaudio==2.0.2+cu118
 
-# FFmpeg interface (for audio combining)
-ffmpeg-python>=0.2.0
+# AI/ML Libraries
+openai-whisper==20231117
+numpy==1.24.3
 
-# Optional: For GPU acceleration (uncomment if you have CUDA)
-# torch>=2.0.0
-# torchaudio>=2.0.0
+# Audio Processing
+soundfile==0.12.1
+librosa==0.10.1
+
+# Video/Image Processing
+opencv-python==4.8.1.78
+Pillow==10.0.1
+ffmpeg-python==0.2.0
+
+# Web Interface
+gradio==3.50.2
+
+# Additional Audio Dependencies
+scipy==1.11.4
+numba==0.58.1
+resampy==0.4.2
+
+# Image Processing Enhancements
+imageio==2.31.5
+imageio-ffmpeg==0.4.9
+
+# System Dependencies (if needed)
+psutil==5.9.6
+
+# Optional: For better performance
+accelerate==0.24.1
+
+# Development/Debugging (optional)
+ipython==8.17.2
+matplotlib==3.8.2
+
+# Note: FFmpeg binary must be installed separately
+# Windows: Download from https://ffmpeg.org/download.html
+# Linux: sudo apt install ffmpeg
+# Mac: brew install ffmpeg
