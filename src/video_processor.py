@@ -8,6 +8,7 @@ UPDATED: Added dead air support - last text remains visible during ending silenc
 FIXED: Video duration preserved for dead air (no cutting with FFmpeg)
 FINAL: Fixed text disappearing during dead air - text now stays visible
 FIXED: Dynamic font sizing and permanent margins for 1-5 words per segment
+CRITICAL FIX: Added script validation to prevent text rendering beyond actual audio content
 """
 
 import cv2
@@ -118,7 +119,7 @@ def calculate_dynamic_font_size_for_video(base_font_size: int, words_per_segment
     return adjusted_size
 
 class ProVideoProcessor:
-    """Enhanced professional video processor with NO FADE EFFECTS + Reddit integration + Dead air support + Dynamic font sizing"""
+    """FIXED: Enhanced professional video processor with NO FADE EFFECTS + Reddit integration + Dead air support + Script validation"""
     
     def __init__(self):
         """Initialize video processor with professional settings"""
@@ -145,6 +146,10 @@ class ProVideoProcessor:
         
         # FIXED: Margin settings - permanent 10% margins
         self.safe_margin_percentage = 0.10  # 10% margins on all sides
+        
+        # NEW: Script validation settings
+        self.script_validation_enabled = True
+        self.dead_air_text_protection = True
         
     def cleanup_previous_session(self):
         """Clean up previous generation before starting new one"""
@@ -320,11 +325,11 @@ class ProVideoProcessor:
     def compose_video_with_reddit(self, background_video_path: str, text_overlays: List[Dict], 
                                 reddit_image: Image.Image, reddit_display_duration: float) -> str:
         """
-        Compose video with Reddit post image during title phase + text overlays during main phase + dead air support
+        FIXED: Compose video with Reddit post image during title phase + text overlays during main phase + validated dead air support
         
         Args:
             background_video_path: Path to processed background video
-            text_overlays: List of text overlays for main phase (includes dead air extension)
+            text_overlays: List of text overlays for main phase (validated for script safety)
             reddit_image: PIL Image of Reddit post
             reddit_display_duration: Duration to show Reddit image (title + delay)
             
@@ -332,7 +337,7 @@ class ProVideoProcessor:
             Path to composed video
         """
         try:
-            logger.info(f"Composing video with Reddit integration - Reddit display: {reddit_display_duration:.2f}s")
+            logger.info(f"Composing video with Reddit integration + SCRIPT VALIDATION - Reddit display: {reddit_display_duration:.2f}s")
             
             cap = cv2.VideoCapture(background_video_path)
             if not cap.isOpened():
@@ -347,6 +352,9 @@ class ProVideoProcessor:
             
             # Prepare Reddit image for overlay
             reddit_overlay = self._prepare_reddit_overlay(reddit_image, (frame_width, frame_height))
+            
+            # ENHANCED: Validate text overlays for script safety
+            validated_overlays = self._validate_text_overlays_for_script_safety(text_overlays)
             
             frame_number = 0
             batch_size = 15
@@ -363,8 +371,8 @@ class ProVideoProcessor:
                 time_batch.append(current_time)
                 
                 if len(frame_batch) >= batch_size:
-                    processed_batch = self._process_reddit_integration_batch(
-                        frame_batch, time_batch, text_overlays, reddit_overlay, reddit_display_duration
+                    processed_batch = self._process_reddit_integration_batch_with_validation(
+                        frame_batch, time_batch, validated_overlays, reddit_overlay, reddit_display_duration
                     )
                     
                     for processed_frame in processed_batch:
@@ -376,8 +384,8 @@ class ProVideoProcessor:
                 frame_number += 1
             
             if frame_batch:
-                processed_batch = self._process_reddit_integration_batch(
-                    frame_batch, time_batch, text_overlays, reddit_overlay, reddit_display_duration
+                processed_batch = self._process_reddit_integration_batch_with_validation(
+                    frame_batch, time_batch, validated_overlays, reddit_overlay, reddit_display_duration
                 )
                 for processed_frame in processed_batch:
                     out.write(processed_frame)
@@ -385,12 +393,60 @@ class ProVideoProcessor:
             cap.release()
             out.release()
             
-            logger.info(f"Reddit video composition complete: {output_path}")
+            logger.info(f"Reddit video composition complete with SCRIPT VALIDATION: {output_path}")
             return output_path
             
         except Exception as e:
             logger.error(f"Reddit video composition failed: {e}")
             return background_video_path
+
+    def _validate_text_overlays_for_script_safety(self, text_overlays: List[Dict]) -> List[Dict]:
+        """
+        NEW: Validate text overlays to ensure no script-generated text appears during dead air
+        
+        Args:
+            text_overlays: List of text overlay dictionaries
+            
+        Returns:
+            Validated list of text overlays
+        """
+        if not self.script_validation_enabled:
+            logger.info("Script validation disabled, returning all overlays")
+            return text_overlays
+        
+        validated_overlays = []
+        discarded_overlays = []
+        
+        for overlay in text_overlays:
+            # Check if overlay has dead air extension
+            has_dead_air = overlay.get('has_dead_air_extension', False)
+            dead_air_start = overlay.get('dead_air_start', 0)
+            natural_end = overlay.get('natural_end', overlay.get('end_time', 0))
+            
+            # If overlay has dead air extension, validate it's safe
+            if has_dead_air and dead_air_start > 0:
+                # Check if the overlay's natural end is before dead air starts
+                if natural_end <= dead_air_start + 0.1:  # Small tolerance
+                    validated_overlays.append(overlay)
+                    logger.debug(f"✅ VALIDATED overlay with dead air: '{overlay.get('text', '')[:30]}...' "
+                               f"(natural end: {natural_end:.2f}s, dead air starts: {dead_air_start:.2f}s)")
+                else:
+                    discarded_overlays.append(overlay)
+                    logger.error(f"🛡️ DISCARDED unsafe overlay: '{overlay.get('text', '')[:30]}...' "
+                               f"(natural end: {natural_end:.2f}s > dead air start: {dead_air_start:.2f}s)")
+            else:
+                # Regular overlay without dead air extension
+                validated_overlays.append(overlay)
+        
+        if discarded_overlays:
+            logger.error(f"🛡️ SCRIPT VALIDATION: Discarded {len(discarded_overlays)} text overlays to prevent dead air text issues!")
+            for overlay in discarded_overlays:
+                logger.error(f"  • Discarded: '{overlay.get('text', '')[:40]}...' "
+                           f"(would appear during dead air)")
+        else:
+            logger.info(f"✅ SCRIPT VALIDATION: All {len(validated_overlays)} text overlays are safe")
+        
+        return validated_overlays
 
     def _prepare_reddit_overlay(self, reddit_image: Image.Image, target_size: Tuple[int, int]) -> np.ndarray:
         """
@@ -446,32 +502,32 @@ class ProVideoProcessor:
             fallback[:] = (255, 69, 0)  # Reddit orange
             return fallback
 
-    def _process_reddit_integration_batch(self, frames: List[np.ndarray], times: List[float], 
-                                        text_overlays: List[Dict], reddit_overlay: np.ndarray, 
-                                        reddit_display_duration: float) -> List[np.ndarray]:
-        """Process frame batch with Reddit integration and dead air support"""
+    def _process_reddit_integration_batch_with_validation(self, frames: List[np.ndarray], times: List[float], 
+                                                        text_overlays: List[Dict], reddit_overlay: np.ndarray, 
+                                                        reddit_display_duration: float) -> List[np.ndarray]:
+        """FIXED: Process frame batch with Reddit integration, validated text overlays, and dead air support"""
         if len(frames) <= 3:
-            return [self._add_reddit_and_text_to_frame(frame, text_overlays, reddit_overlay, reddit_display_duration, time) 
+            return [self._add_reddit_and_validated_text_to_frame(frame, text_overlays, reddit_overlay, reddit_display_duration, time) 
                    for frame, time in zip(frames, times)]
         
         def process_single_frame(frame_time_tuple):
             frame, time = frame_time_tuple
-            return self._add_reddit_and_text_to_frame(frame, text_overlays, reddit_overlay, reddit_display_duration, time)
+            return self._add_reddit_and_validated_text_to_frame(frame, text_overlays, reddit_overlay, reddit_display_duration, time)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, self.thread_pool_size)) as executor:
             processed_frames = list(executor.map(process_single_frame, zip(frames, times)))
         
         return processed_frames
 
-    def _add_reddit_and_text_to_frame(self, frame: np.ndarray, text_overlays: List[Dict], 
-                                     reddit_overlay: np.ndarray, reddit_display_duration: float, 
-                                     current_time: float) -> np.ndarray:
+    def _add_reddit_and_validated_text_to_frame(self, frame: np.ndarray, text_overlays: List[Dict], 
+                                              reddit_overlay: np.ndarray, reddit_display_duration: float, 
+                                              current_time: float) -> np.ndarray:
         """
-        UPDATED: Add Reddit image and/or text overlays to frame based on timing (with dead air support)
+        FIXED: Add Reddit image and/or validated text overlays to frame based on timing (with script-safe dead air support)
         
         Args:
             frame: Video frame
-            text_overlays: List of text overlays (includes dead air extension for last segment)
+            text_overlays: List of VALIDATED text overlays (script-safe)
             reddit_overlay: Prepared Reddit image
             reddit_display_duration: Duration to show Reddit image
             current_time: Current time in video
@@ -483,7 +539,7 @@ class ProVideoProcessor:
         if current_time <= reddit_display_duration:
             frame = self._overlay_reddit_image(frame, reddit_overlay)
         
-        # Phase 2: Text overlays (after reddit_display_duration) - includes dead air
+        # Phase 2: Validated text overlays (after reddit_display_duration) - includes script-safe dead air
         if current_time > reddit_display_duration:
             active_texts = [
                 overlay for overlay in text_overlays
@@ -496,17 +552,83 @@ class ProVideoProcessor:
                 pil_image = Image.fromarray(rgb_frame)
                 
                 for text_info in active_texts:
-                    # INSTANT DISPLAY - no opacity calculation, only heartbeat scale
-                    opacity = 1.0  # ALWAYS FULL OPACITY (even during dead air)
-                    scale_factor = self._calculate_heartbeat_scale(current_time)
+                    # Check if we're in the dead air period for this overlay
+                    is_in_dead_air = self._is_current_time_in_dead_air(text_info, current_time)
                     
-                    pil_image = self._draw_text_instant_display_with_dynamic_sizing(pil_image, text_info, opacity, scale_factor)
+                    if is_in_dead_air and self.dead_air_text_protection:
+                        # VALIDATION: Ensure this text is safe to display during dead air
+                        if self._is_overlay_safe_for_dead_air(text_info):
+                            # INSTANT DISPLAY - no opacity calculation, only heartbeat scale (SAFE for dead air)
+                            opacity = 1.0  # ALWAYS FULL OPACITY
+                            scale_factor = self._calculate_heartbeat_scale(current_time)
+                            
+                            pil_image = self._draw_text_instant_display_with_dynamic_sizing(pil_image, text_info, opacity, scale_factor)
+                            
+                            # Log dead air text display for debugging
+                            logger.debug(f"🔥 SAFE dead air text at {current_time:.2f}s: '{text_info.get('text', '')[:20]}...'")
+                        else:
+                            # CRITICAL: This should never happen if validation worked correctly
+                            logger.error(f"🛡️ BLOCKED unsafe text during dead air at {current_time:.2f}s: '{text_info.get('text', '')[:20]}...'")
+                    else:
+                        # Normal text display (not in dead air period)
+                        # INSTANT DISPLAY - no opacity calculation, only heartbeat scale
+                        opacity = 1.0  # ALWAYS FULL OPACITY
+                        scale_factor = self._calculate_heartbeat_scale(current_time)
+                        
+                        pil_image = self._draw_text_instant_display_with_dynamic_sizing(pil_image, text_info, opacity, scale_factor)
                 
                 # Convert back to OpenCV format
                 rgb_array = np.array(pil_image)
                 frame = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
         
         return frame
+
+    def _is_current_time_in_dead_air(self, text_overlay: Dict, current_time: float) -> bool:
+        """
+        NEW: Check if current time is in the dead air period for a specific text overlay
+        
+        Args:
+            text_overlay: Text overlay dictionary
+            current_time: Current video time
+            
+        Returns:
+            True if current time is in the dead air period
+        """
+        has_dead_air = text_overlay.get('has_dead_air_extension', False)
+        if not has_dead_air:
+            return False
+        
+        dead_air_start = text_overlay.get('dead_air_start', 0)
+        overlay_end = text_overlay.get('end_time', 0)
+        
+        # Check if we're in the dead air portion of this overlay
+        return dead_air_start <= current_time <= overlay_end
+
+    def _is_overlay_safe_for_dead_air(self, text_overlay: Dict) -> bool:
+        """
+        NEW: Check if a text overlay is safe to display during dead air period
+        
+        Args:
+            text_overlay: Text overlay dictionary
+            
+        Returns:
+            True if the overlay is safe for dead air display
+        """
+        # Check if overlay has proper dead air extension
+        has_dead_air = text_overlay.get('has_dead_air_extension', False)
+        if not has_dead_air:
+            return False
+        
+        # Check if the overlay's natural end is before dead air starts
+        natural_end = text_overlay.get('natural_end', 0)
+        dead_air_start = text_overlay.get('dead_air_start', 0)
+        
+        if natural_end > dead_air_start + 0.1:  # Small tolerance
+            logger.error(f"Overlay natural end ({natural_end:.2f}s) extends beyond dead air start ({dead_air_start:.2f}s)")
+            return False
+        
+        # Additional safety checks could go here
+        return True
 
     def _overlay_reddit_image(self, frame: np.ndarray, reddit_overlay: np.ndarray) -> np.ndarray:
         """
@@ -778,43 +900,65 @@ class ProVideoProcessor:
             return video_path
     
     def create_text_overlays(self, segments: List[Dict], style_config: Dict) -> List[Dict]:
-        """FIXED: Create text overlay information with NO FADE EFFECTS, dynamic font sizing, and dead air support"""
+        """FIXED: Create text overlay information with NO FADE EFFECTS, dynamic font sizing, script validation, and dead air support"""
         text_overlays = []
         
-        logger.info(f"Creating {len(segments)} text overlays with INSTANT display, dynamic font sizing, and dead air support")
+        logger.info(f"Creating {len(segments)} text overlays with SCRIPT VALIDATION, dynamic font sizing, and dead air support")
         
         # Extract words per segment for dynamic font sizing
         words_per_segment = style_config.get('words_per_segment', 2)
         
+        # Track script validation info
+        script_validated_count = 0
+        dead_air_extended_count = 0
+        
         for i, segment in enumerate(segments):
             try:
-                text_overlay = self._create_text_overlay_with_dynamic_sizing(segment, style_config, i, len(segments), words_per_segment)
+                text_overlay = self._create_text_overlay_with_dynamic_sizing_and_validation(
+                    segment, style_config, i, len(segments), words_per_segment
+                )
                 if text_overlay:
                     text_overlays.append(text_overlay)
+                    
+                    # Track validation statistics
+                    if text_overlay.get('script_validated', False):
+                        script_validated_count += 1
+                    if text_overlay.get('has_dead_air_extension', False):
+                        dead_air_extended_count += 1
+                        
             except Exception as e:
                 logger.error(f"Failed to create text overlay for segment {i}: {e}")
         
         text_overlays.sort(key=lambda x: x['start_time'])
         
-        # Log dead air information for last segment
+        # ENHANCED: Log script validation and dead air information
+        logger.info(f"📊 TEXT OVERLAY CREATION SUMMARY:")
+        logger.info(f"  • Total overlays: {len(text_overlays)}")
+        logger.info(f"  • Script validated: {script_validated_count}")
+        logger.info(f"  • Dead air extended: {dead_air_extended_count}")
+        
+        # Log dead air information for last segment with enhanced validation
         if text_overlays and text_overlays[-1].get('has_dead_air_extension', False):
             last_overlay = text_overlays[-1]
-            logger.info(f"🔥 DEAD AIR TEXT OVERLAY CONFIRMED with dynamic font sizing:")
+            logger.info(f"🔥 SCRIPT-SAFE DEAD AIR TEXT OVERLAY:")
             logger.info(f"  • Text: '{last_overlay['text'][:50]}{'...' if len(last_overlay['text']) > 50 else ''}'")
             logger.info(f"  • Start time: {last_overlay['start_time']:.2f}s")
             logger.info(f"  • End time: {last_overlay['end_time']:.2f}s")
             logger.info(f"  • Dynamic font size: {last_overlay['style']['dynamic_font_size']}px")
-            logger.info(f"  • Dead air starts at: {last_overlay.get('dead_air_start', 'N/A'):.2f}s")
+            logger.info(f"  • Natural end: {last_overlay.get('natural_end', 'N/A'):.2f}s")
+            logger.info(f"  • Dead air starts: {last_overlay.get('dead_air_start', 'N/A'):.2f}s")
             logger.info(f"  • Dead air duration: {last_overlay.get('dead_air_duration', 'N/A'):.2f}s")
-            logger.info(f"  • Text will remain visible during {last_overlay.get('dead_air_duration', 0):.2f}s dead air!")
+            logger.info(f"  • Script validated: {last_overlay.get('script_validated', False)}")
+            logger.info(f"  ✅ Text will safely remain visible during dead air!")
         else:
-            logger.warning("❌ No text overlay with dead air extension found!")
+            logger.warning("❌ No text overlay with script-safe dead air extension found!")
         
-        logger.info(f"Successfully created {len(text_overlays)} text overlays with instant display, dynamic font sizing, and dead air support")
+        logger.info(f"Successfully created {len(text_overlays)} SCRIPT-VALIDATED text overlays")
         return text_overlays
     
-    def _create_text_overlay_with_dynamic_sizing(self, segment: Dict, style_config: Dict, segment_index: int, total_segments: int, words_per_segment: int) -> Optional[Dict]:
-        """FIXED: Create text overlay with NO FADE EFFECTS, dynamic font sizing, and dead air support"""
+    def _create_text_overlay_with_dynamic_sizing_and_validation(self, segment: Dict, style_config: Dict, 
+                                                              segment_index: int, total_segments: int, words_per_segment: int) -> Optional[Dict]:
+        """FIXED: Create text overlay with NO FADE EFFECTS, dynamic font sizing, script validation, and dead air support"""
         try:
             text = segment['text']
             start_time = segment['start']
@@ -840,6 +984,9 @@ class ProVideoProcessor:
             # NO FADE EFFECTS - instant display
             display_end = start_time + duration
             
+            # NEW: Script validation for overlay
+            script_validated = self._validate_overlay_script_safety(segment)
+            
             text_overlay = {
                 'text': text,
                 'start_time': start_time,
@@ -847,6 +994,7 @@ class ProVideoProcessor:
                 'end_time': display_end,
                 'fade_in_duration': 0,  # NO FADE IN
                 'fade_out_duration': 0,  # NO FADE OUT
+                'script_validated': script_validated,  # NEW: Script validation status
                 'style': {
                     'font_size': base_font_size,  # Keep original for reference
                     'dynamic_font_size': dynamic_font_size,  # NEW: Dynamic font size
@@ -860,18 +1008,80 @@ class ProVideoProcessor:
                 }
             }
             
-            # UPDATED: Copy dead air information from segment
+            # ENHANCED: Copy and validate dead air information from segment
             if segment.get('has_dead_air_extension', False):
                 text_overlay['has_dead_air_extension'] = True
                 text_overlay['dead_air_start'] = segment.get('dead_air_start', 0)
                 text_overlay['dead_air_duration'] = segment.get('dead_air_duration', 0)
                 text_overlay['natural_end'] = segment.get('natural_end', 0)
+                
+                # ADDITIONAL VALIDATION: Ensure dead air extension is script-safe
+                if self._validate_dead_air_extension_safety(text_overlay):
+                    logger.debug(f"✅ Dead air extension validated for overlay: '{text[:30]}...'")
+                else:
+                    logger.error(f"🛡️ Dead air extension failed validation for overlay: '{text[:30]}...'")
+                    # Remove dead air extension if it's not safe
+                    text_overlay['has_dead_air_extension'] = False
+                    text_overlay['end_time'] = text_overlay.get('natural_end', display_end)
+                    text_overlay['duration'] = text_overlay['end_time'] - text_overlay['start_time']
             
             return text_overlay
             
         except Exception as e:
-            logger.error(f"Failed to create text overlay info: {e}")
+            logger.error(f"Failed to create text overlay info with validation: {e}")
             return None
+
+    def _validate_overlay_script_safety(self, segment: Dict) -> bool:
+        """
+        NEW: Validate that a text overlay is safe from script estimation issues
+        
+        Args:
+            segment: Text segment dictionary
+            
+        Returns:
+            True if overlay is script-safe
+        """
+        # Check if segment has estimated words (problematic)
+        has_estimated_words = segment.get('has_estimated_words', False)
+        if has_estimated_words:
+            logger.warning(f"Segment contains estimated words: '{segment.get('text', '')[:30]}...'")
+            return False
+        
+        # Check word sources for any script estimation
+        word_sources = segment.get('word_sources', [])
+        if 'script_estimated' in word_sources:
+            logger.warning(f"Segment contains script-estimated words: '{segment.get('text', '')[:30]}...'")
+            return False
+        
+        return True
+
+    def _validate_dead_air_extension_safety(self, text_overlay: Dict) -> bool:
+        """
+        NEW: Validate that a dead air extension is safe and won't cause script issues
+        
+        Args:
+            text_overlay: Text overlay dictionary with dead air extension
+            
+        Returns:
+            True if dead air extension is safe
+        """
+        if not text_overlay.get('has_dead_air_extension', False):
+            return True  # No dead air extension, so it's safe
+        
+        natural_end = text_overlay.get('natural_end', 0)
+        dead_air_start = text_overlay.get('dead_air_start', 0)
+        
+        # Ensure natural end is before dead air starts
+        if natural_end > dead_air_start + 0.1:  # Small tolerance
+            logger.error(f"Dead air extension unsafe: natural end {natural_end:.2f}s > dead air start {dead_air_start:.2f}s")
+            return False
+        
+        # Ensure overlay was script validated
+        if not text_overlay.get('script_validated', False):
+            logger.warning("Dead air extension on non-script-validated overlay")
+            return False
+        
+        return True
     
     def _calculate_max_chars_for_dynamic_font_size(self, dynamic_font_size: int, words_per_segment: int) -> int:
         """FIXED: Calculate maximum characters per line based on dynamic font size and word count"""
@@ -1007,19 +1217,21 @@ class ProVideoProcessor:
         return processed_frames
     
     def _add_text_overlays_to_frame(self, frame: np.ndarray, text_overlays: List[Dict], current_time: float) -> np.ndarray:
-        """FIXED: Add text overlays to frame with INSTANT display, dynamic font sizing, and heartbeat animation (dead air support)"""
+        """FIXED: Add text overlays to frame with INSTANT display, dynamic font sizing, and heartbeat animation (script-safe dead air support)"""
         active_texts = [
             overlay for overlay in text_overlays
             if overlay['start_time'] <= current_time <= overlay['end_time']
         ]
         
-        # DEBUG: Log dead air text visibility
-        if current_time > 0 and any(overlay.get('has_dead_air_extension', False) for overlay in text_overlays):
-            dead_air_overlay = next((o for o in text_overlays if o.get('has_dead_air_extension', False)), None)
-            if dead_air_overlay:
+        # ENHANCED: Debug dead air text visibility with script safety checks
+        if current_time > 0:
+            dead_air_overlays = [o for o in text_overlays if o.get('has_dead_air_extension', False)]
+            for dead_air_overlay in dead_air_overlays:
                 dead_air_start = dead_air_overlay.get('dead_air_start', 0)
                 if current_time >= dead_air_start:
-                    logger.debug(f"🔥 DEAD AIR ACTIVE at {current_time:.2f}s - Text: '{dead_air_overlay['text'][:30]}...' (ends at {dead_air_overlay['end_time']:.2f}s)")
+                    is_script_safe = dead_air_overlay.get('script_validated', False)
+                    logger.debug(f"🔥 DEAD AIR TEXT at {current_time:.2f}s: '{dead_air_overlay['text'][:30]}...' "
+                               f"(script_safe: {is_script_safe}, ends: {dead_air_overlay['end_time']:.2f}s)")
         
         if not active_texts:
             return frame
@@ -1029,17 +1241,49 @@ class ProVideoProcessor:
         pil_image = Image.fromarray(rgb_frame)
         
         for text_info in active_texts:
-            # INSTANT DISPLAY - no opacity calculation, only heartbeat scale (works during dead air too)
-            opacity = 1.0  # ALWAYS FULL OPACITY
-            scale_factor = self._calculate_heartbeat_scale(current_time)
-            
-            pil_image = self._draw_text_instant_display_with_dynamic_sizing(pil_image, text_info, opacity, scale_factor)
+            # ENHANCED: Script safety check before rendering
+            if self._is_overlay_safe_for_rendering(text_info, current_time):
+                # INSTANT DISPLAY - no opacity calculation, only heartbeat scale (works during dead air too)
+                opacity = 1.0  # ALWAYS FULL OPACITY
+                scale_factor = self._calculate_heartbeat_scale(current_time)
+                
+                pil_image = self._draw_text_instant_display_with_dynamic_sizing(pil_image, text_info, opacity, scale_factor)
+            else:
+                # CRITICAL: Block unsafe text rendering
+                logger.error(f"🛡️ BLOCKED unsafe text rendering at {current_time:.2f}s: '{text_info.get('text', '')[:20]}...'")
         
         # Convert back to OpenCV format
-        rgb_array = np.array(pil_image)
-        bgr_frame = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        bgr_frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
         
         return bgr_frame
+
+    def _is_overlay_safe_for_rendering(self, text_overlay: Dict, current_time: float) -> bool:
+        """
+        NEW: Check if a text overlay is safe to render at the current time
+        
+        Args:
+            text_overlay: Text overlay dictionary
+            current_time: Current video time
+            
+        Returns:
+            True if safe to render
+        """
+        # Always safe if script validation is disabled
+        if not self.script_validation_enabled:
+            return True
+        
+        # Check if overlay was script validated
+        if not text_overlay.get('script_validated', True):  # Default to True for backward compatibility
+            logger.warning(f"Overlay not script validated: '{text_overlay.get('text', '')[:20]}...'")
+            return False
+        
+        # If we're in dead air period, perform additional checks
+        if self._is_current_time_in_dead_air(text_overlay, current_time):
+            # Ensure this overlay is safe for dead air display
+            return self._is_overlay_safe_for_dead_air(text_overlay)
+        
+        # Normal text display (not in dead air)
+        return True
     
     def _calculate_heartbeat_scale(self, current_time: float) -> float:
         """Calculate subtle heartbeat scale effect - 90% slower (works during dead air)"""

@@ -5,6 +5,7 @@ Enhanced with dual audio support for Reddit integration
 FIXED VERSION - All errors resolved
 UPDATED: Enhanced dead air support with 3.5-second ending silence
 FIXED: Proper audio composition with exact timing for video synchronization
+CRITICAL FIX: Added validation to prevent script words extending beyond actual audio duration
 """
 
 import whisper
@@ -24,7 +25,7 @@ warnings.filterwarnings("ignore", message=".*Failed to launch Triton kernels.*")
 logger = logging.getLogger(__name__)
 
 class AudioProcessor:
-    """Handles all audio processing and transcription tasks with GPU optimizations + dual audio support + dead air"""
+    """FIXED: Handles all audio processing and transcription tasks with GPU optimizations + dual audio support + dead air + Script validation"""
     
     def __init__(self, model_size: str = "base"):
         """Initialize with Whisper model and GPU detection"""
@@ -122,7 +123,7 @@ class AudioProcessor:
     
     def process_dual_audio_system(self, title_audio_path: str, main_audio_path: str, ending_silence: float = None) -> Dict:
         """
-        FIXED: Process both audio files for Reddit integration system with EXACT timing calculations
+        FIXED: Process both audio files for Reddit integration system with EXACT timing calculations + Script validation
         
         Args:
             title_audio_path: Path to title audio
@@ -130,14 +131,14 @@ class AudioProcessor:
             ending_silence: Duration of ending silence for dead air (default 3.5s)
             
         Returns:
-            Dictionary with EXACT timing information including dead air
+            Dictionary with EXACT timing information including dead air + script safety info
         """
         try:
             # Use default ending silence if not specified
             if ending_silence is None:
                 ending_silence = self.default_ending_silence
             
-            logger.info(f"🎵 Processing dual audio system (title + main + {ending_silence:.1f}s dead air)")
+            logger.info(f"🎵 Processing dual audio system with SCRIPT VALIDATION (title + main + {ending_silence:.1f}s dead air)")
             
             # Validate both files first
             is_valid, validation_message = self.validate_dual_audio_files(title_audio_path, main_audio_path)
@@ -154,8 +155,8 @@ class AudioProcessor:
             # Get EXACT durations
             title_duration = self.get_audio_duration(title_audio_path)
             
-            # Transcribe main audio only
-            main_transcription = self.transcribe_with_timestamps(main_audio_path)
+            # Transcribe main audio only with enhanced validation
+            main_transcription = self.transcribe_with_timestamps_and_validation(main_audio_path)
             
             if not main_transcription['words']:
                 return {
@@ -175,6 +176,10 @@ class AudioProcessor:
             audio_content_duration = reddit_display_duration + main_duration
             total_duration = audio_content_duration + ending_silence
             
+            # NEW: Calculate safe audio bounds for script validation
+            safe_main_audio_end = main_duration  # End of actual main audio content
+            safe_total_audio_end = audio_content_duration  # End of all audio content (before dead air)
+            
             result = {
                 'success': True,
                 'title_duration': title_duration,
@@ -188,6 +193,15 @@ class AudioProcessor:
                 'title_audio_path': title_audio_path,
                 'main_audio_path': main_audio_path,
                 'dead_air_start': audio_content_duration,  # When dead air begins
+                # NEW: Safe bounds for script validation
+                'safe_main_audio_end': safe_main_audio_end,  # End of main audio only
+                'safe_total_audio_end': safe_total_audio_end,  # End of all audio content
+                'script_validation_bounds': {
+                    'main_audio_end': safe_main_audio_end,
+                    'total_audio_end': safe_total_audio_end,
+                    'dead_air_start': audio_content_duration,
+                    'tolerance': 0.1  # Small tolerance for timing imprecision
+                },
                 'phases': {
                     'title_phase': {'start': 0.0, 'end': title_duration},
                     'delay_phase': {'start': title_duration, 'end': reddit_display_duration},
@@ -196,13 +210,14 @@ class AudioProcessor:
                 }
             }
             
-            logger.info(f"✅ Dual audio processing complete with EXACT timing:")
+            logger.info(f"✅ Dual audio processing complete with SCRIPT VALIDATION bounds:")
             logger.info(f"  • Title: {title_duration:.2f}s")
             logger.info(f"  • Delay: {delay_duration:.2f}s") 
             logger.info(f"  • Main: {main_duration:.2f}s")
             logger.info(f"  • Audio content ends: {audio_content_duration:.2f}s")
             logger.info(f"  • Dead air: {ending_silence:.2f}s")
             logger.info(f"  • Total duration: {total_duration:.2f}s")
+            logger.info(f"  🛡️ Script validation bounds: main={safe_main_audio_end:.2f}s, total={safe_total_audio_end:.2f}s")
             
             return result
             
@@ -307,6 +322,123 @@ class AudioProcessor:
                 'segments_count': 0,
                 'device_used': self.device,
                 'transcription_time': 0,
+                'error': str(e)
+            }
+    
+    def transcribe_with_timestamps_and_validation(self, audio_path: str) -> Dict:
+        """
+        NEW: Transcribe audio with enhanced validation to prevent script timing issues
+        
+        Args:
+            audio_path: Path to audio file
+            
+        Returns:
+            Dictionary with transcription and validation info
+        """
+        try:
+            logger.info(f"🎤 Starting VALIDATED transcription on {self.device.upper()}...")
+            
+            # Get exact audio duration first for validation bounds
+            actual_audio_duration = self.get_audio_duration(audio_path)
+            
+            # Show GPU memory usage if using CUDA
+            if self.device == "cuda":
+                gpu_memory_before = torch.cuda.memory_allocated(0) / 1024**2
+                logger.info(f"GPU Memory before: {gpu_memory_before:.1f}MB")
+            
+            start_time = time.time()
+            
+            with self.model_lock:  # Thread-safe model access
+                result = self.whisper_model.transcribe(
+                    audio_path,
+                    word_timestamps=True,
+                    verbose=False,
+                    language="en"
+                )
+            
+            transcription_time = time.time() - start_time
+            
+            # Show performance stats
+            if self.device == "cuda":
+                gpu_memory_after = torch.cuda.memory_allocated(0) / 1024**2
+                logger.info(f"GPU Memory after: {gpu_memory_after:.1f}MB")
+                logger.info(f"⚡ GPU Transcription completed in {transcription_time:.2f}s")
+            else:
+                logger.info(f"💻 CPU Transcription completed in {transcription_time:.2f}s")
+            
+            words_with_timing = []
+            full_text = ""
+            discarded_words = 0
+            
+            for segment in result.get('segments', []):
+                if 'words' in segment and segment['words']:
+                    for word_data in segment['words']:
+                        word_start = word_data.get('start', 0)
+                        word_end = word_data.get('end', 0)
+                        
+                        # VALIDATION: Ensure word timing is within actual audio bounds
+                        if word_end <= actual_audio_duration + 0.1:  # Small tolerance for imprecision
+                            word_info = {
+                                'text': word_data.get('word', '').strip(),
+                                'start': word_start,
+                                'end': word_end,
+                                'confidence': word_data.get('probability', 0.9),
+                                'source': 'whisper_validated'  # Mark as validated Whisper word
+                            }
+                            words_with_timing.append(word_info)
+                            full_text += word_info['text'] + " "
+                        else:
+                            discarded_words += 1
+                            logger.debug(f"Discarded Whisper word ending at {word_end:.2f}s (beyond {actual_audio_duration:.2f}s)")
+            
+            if discarded_words > 0:
+                logger.warning(f"🛡️ VALIDATION: Discarded {discarded_words} Whisper words extending beyond audio duration")
+            
+            # Use actual audio duration, not the last word's end time
+            total_duration = actual_audio_duration
+            
+            transcription_result = {
+                'text': full_text.strip(),
+                'words': words_with_timing,
+                'duration': total_duration,
+                'actual_audio_duration': actual_audio_duration,  # NEW: Store actual audio duration
+                'language': result.get('language', 'en'),
+                'segments_count': len(result.get('segments', [])),
+                'device_used': self.device,
+                'transcription_time': transcription_time,
+                'validation_info': {  # NEW: Validation information
+                    'total_whisper_words': len(words_with_timing) + discarded_words,
+                    'validated_words': len(words_with_timing),
+                    'discarded_words': discarded_words,
+                    'audio_duration_bound': actual_audio_duration,
+                    'validation_tolerance': 0.1
+                }
+            }
+            
+            logger.info(f"✅ VALIDATED transcription complete: {len(words_with_timing)} words, {total_duration:.2f}s duration")
+            if discarded_words > 0:
+                logger.info(f"🛡️ Validation prevented {discarded_words} words from extending beyond audio")
+            
+            return transcription_result
+            
+        except Exception as e:
+            logger.error(f"Validated transcription failed: {e}")
+            return {
+                'text': '',
+                'words': [],
+                'duration': 0,
+                'actual_audio_duration': 0,
+                'language': 'en',
+                'segments_count': 0,
+                'device_used': self.device,
+                'transcription_time': 0,
+                'validation_info': {
+                    'total_whisper_words': 0,
+                    'validated_words': 0,
+                    'discarded_words': 0,
+                    'audio_duration_bound': 0,
+                    'validation_tolerance': 0.1
+                },
                 'error': str(e)
             }
     
@@ -595,13 +727,21 @@ class AudioProcessor:
                     'reddit_display_duration': delay_end,  # How long Reddit post is shown
                     'text_display_duration': main_phase_duration + dead_air_duration,  # How long text is shown
                     'text_start_time': delay_end  # When text starts appearing
+                },
+                # NEW: Script validation bounds
+                'script_validation_bounds': {
+                    'main_audio_end': main_phase_duration,  # End of main audio only
+                    'total_audio_end': main_end,  # End of all audio content
+                    'dead_air_start': main_end,  # When dead air begins
+                    'safe_word_end_limit': main_phase_duration + 0.1  # Safe limit for script words
                 }
             }
             
-            logger.info(f"📊 Audio composition analysis:")
+            logger.info(f"📊 Audio composition analysis with script validation bounds:")
             logger.info(f"  • Total duration: {total_end:.2f}s")
             logger.info(f"  • Audio content: {main_end:.2f}s ({composition['totals']['active_audio_percentage']:.1f}%)")
             logger.info(f"  • Dead air: {dead_air_duration:.2f}s ({composition['totals']['dead_air_percentage']:.1f}%)")
+            logger.info(f"  🛡️ Script word limit: {composition['script_validation_bounds']['safe_word_end_limit']:.2f}s")
             
             return composition
             
@@ -621,12 +761,13 @@ class AudioProcessor:
             'purpose': 'Reflection time for viewers - last text remains visible',
             'behavior': 'Background video continues, text stays visible, audio is silent',
             'recommended_range': '2.0 - 5.0 seconds',
-            'current_setting': f'{self.default_ending_silence:.1f} seconds'
+            'current_setting': f'{self.default_ending_silence:.1f} seconds',
+            'script_safety': 'Script words are validated to not extend into dead air period'
         }
     
     def verify_dead_air_timing(self, prepared_audio_path: str, expected_dead_air_duration: float) -> bool:
         """
-        NEW: Verify that prepared audio has correct dead air timing
+        Verify that prepared audio has correct dead air timing
         
         Args:
             prepared_audio_path: Path to prepared audio file
@@ -662,3 +803,69 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Failed to verify dead air timing: {e}")
             return False
+    
+    def validate_script_words_against_audio(self, words: List[Dict], main_audio_duration: float) -> Tuple[List[Dict], int]:
+        """
+        NEW: Validate script-matched words against actual audio duration to prevent dead air text issues
+        
+        Args:
+            words: List of word dictionaries from script matching
+            main_audio_duration: Duration of main audio content (without dead air)
+            
+        Returns:
+            Tuple of (validated_words, discarded_count)
+        """
+        if not words:
+            return words, 0
+        
+        validated_words = []
+        discarded_words = []
+        tolerance = 0.1  # Small tolerance for timing imprecision
+        
+        logger.info(f"🛡️ SCRIPT VALIDATION: Checking {len(words)} words against audio duration {main_audio_duration:.2f}s")
+        
+        for word in words:
+            word_end = word.get('end', 0)
+            word_source = word.get('source', 'unknown')
+            word_text = word.get('text', '')
+            
+            # Be especially strict with script-estimated words
+            max_allowed_end = main_audio_duration + (tolerance if word_source != 'script_estimated' else 0.0)
+            
+            if word_end <= max_allowed_end:
+                validated_words.append(word)
+            else:
+                discarded_words.append(word)
+                logger.warning(f"🛡️ DISCARDED script word: '{word_text}' "
+                             f"(ends at {word_end:.2f}s > {max_allowed_end:.2f}s, source: {word_source})")
+        
+        discarded_count = len(discarded_words)
+        
+        if discarded_count > 0:
+            logger.error(f"🛡️ SCRIPT VALIDATION: Discarded {discarded_count} words to prevent dead air text issues!")
+            logger.error("These words would have appeared during the 3.5s dead air period.")
+            
+            # Log details of discarded words for debugging
+            for word in discarded_words:
+                logger.error(f"  • '{word.get('text', '')}' at {word.get('end', 0):.2f}s ({word.get('source', 'unknown')})")
+        else:
+            logger.info(f"✅ SCRIPT VALIDATION: All {len(validated_words)} words are within audio bounds")
+        
+        return validated_words, discarded_count
+    
+    def get_script_validation_info(self) -> Dict:
+        """
+        NEW: Get information about script validation features
+        
+        Returns:
+            Dictionary with script validation details
+        """
+        return {
+            'validation_enabled': True,
+            'purpose': 'Prevent script words from appearing during dead air period',
+            'validation_method': 'Check word end times against actual audio duration',
+            'tolerance': 0.1,  # seconds
+            'strict_sources': ['script_estimated'],
+            'protection': 'Automatically discards words extending beyond audio content',
+            'dead_air_protection': f'{self.default_ending_silence:.1f}s dead air period protected'
+        }

@@ -8,6 +8,7 @@ FIXED: Live preview outline effect (no word duplication)
 UPDATED: Added 3.5-second ending silence with last text remaining visible
 FIXED: Video duration preserved for dead air (no cutting)
 FIXED: Dynamic font sizing and permanent margins for 1-5 words per segment
+CRITICAL FIX: Script matching no longer creates extra segments during dead air
 """
 
 import gradio as gr
@@ -34,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ScriptMatcher:
-    """Handles matching provided script with Whisper timing data while preserving formatting"""
+    """FIXED: Handles matching provided script with Whisper timing data while preventing dead air text issues"""
     
     def __init__(self):
         self.confidence_threshold = 0.7
@@ -80,24 +81,25 @@ class ScriptMatcher:
     
     def match_script_to_timing(self, script: str, whisper_words: List[Dict]) -> List[Dict]:
         """
-        Match provided script words to Whisper timing data while preserving formatting
+        FIXED: Match provided script words to Whisper timing data while preventing dead air issues
         
         Args:
             script: User-provided original script
             whisper_words: Whisper transcription with timing
             
         Returns:
-            List of word dictionaries with accurate text and timing
+            List of word dictionaries with accurate text and timing (NO EXTRA WORDS BEYOND AUDIO)
         """
         if not script.strip():
+            logger.info("No script provided, using Whisper transcription only")
             return whisper_words
         
         script_words = self.split_script_into_words(script)
         whisper_clean = [self.clean_text_for_matching(w.get('text', '')) for w in whisper_words]
         
-        logger.info(f"Matching {len(script_words)} script words to {len(whisper_words)} whisper words")
+        logger.info(f"Script matching: {len(script_words)} script words to {len(whisper_words)} whisper words")
         
-        # Advanced alignment - try to match script words to whisper timing
+        # FIXED: Only match words that have corresponding Whisper timing - NO ESTIMATION
         matched_words = []
         script_index = 0
         
@@ -121,12 +123,15 @@ class ScriptMatcher:
                     }
                     matched_words.append(matched_word)
                     script_index += 1
+                    
+                    logger.debug(f"Matched: '{script_word_original}' -> '{whisper_clean_text}' at {whisper_word.get('start', 0):.2f}s")
                 else:
                     # Use whisper word if no match found (keeps Whisper's smart formatting)
                     matched_words.append({
                         **whisper_word,
                         'source': 'whisper_fallback'
                     })
+                    logger.debug(f"No match for script word '{script_word_cleaned}', used Whisper: '{whisper_clean_text}'")
             else:
                 # Use remaining whisper words if script is exhausted
                 matched_words.append({
@@ -134,22 +139,39 @@ class ScriptMatcher:
                     'source': 'whisper_remaining'
                 })
         
-        # Add any remaining script words with estimated timing
-        while script_index < len(script_words):
-            last_time = matched_words[-1]['end'] if matched_words else 0
-            estimated_duration = 0.5  # 500ms per word estimate
+        # CRITICAL FIX: DO NOT add remaining script words with estimated timing
+        # This was causing text to appear during dead air!
+        if script_index < len(script_words):
+            unmatched_count = len(script_words) - script_index
+            logger.warning(f"Script matching incomplete: {unmatched_count} script words unmatched")
+            logger.warning("Unmatched script words will NOT be added to prevent dead air text issues")
             
-            script_word_obj = script_words[script_index]
-            matched_words.append({
-                'text': script_word_obj['original'],  # Use original formatting
-                'start': last_time,
-                'end': last_time + estimated_duration,
-                'confidence': 0.8,
-                'source': 'script_estimated'
-            })
-            script_index += 1
+            # Log the unmatched words for debugging
+            unmatched_words = [script_words[i]['original'] for i in range(script_index, len(script_words))]
+            logger.info(f"Unmatched script words: {unmatched_words[:10]}{'...' if len(unmatched_words) > 10 else ''}")
         
-        logger.info(f"Script matching complete: {len(matched_words)} final words")
+        # Verify that all matched words have valid timing within audio bounds
+        if matched_words:
+            last_whisper_time = max(w.get('end', 0) for w in whisper_words)
+            valid_matched_words = []
+            
+            for word in matched_words:
+                word_end = word.get('end', 0)
+                if word_end <= last_whisper_time + 0.1:  # Small tolerance
+                    valid_matched_words.append(word)
+                else:
+                    logger.warning(f"Discarding word '{word.get('text', '')}' with timing {word_end:.2f}s beyond audio end {last_whisper_time:.2f}s")
+            
+            matched_words = valid_matched_words
+        
+        logger.info(f"Script matching complete: {len(matched_words)} final words (no dead air extensions)")
+        
+        # Calculate matching statistics
+        script_matched = sum(1 for w in matched_words if w.get('source') == 'script_matched')
+        whisper_used = len(matched_words) - script_matched
+        
+        logger.info(f"Matching results: {script_matched} script words matched, {whisper_used} whisper words used")
+        
         return matched_words
     
     def words_match(self, word1: str, word2: str) -> bool:
@@ -158,9 +180,10 @@ class ScriptMatcher:
         if word1 == word2:
             return True
         
-        # Check if one word contains the other
-        if word1 in word2 or word2 in word1:
-            return True
+        # Check if one word contains the other (for contractions, etc.)
+        if len(word1) > 2 and len(word2) > 2:
+            if word1 in word2 or word2 in word1:
+                return True
         
         # Simple edit distance for short words
         if len(word1) <= 3 or len(word2) <= 3:
@@ -188,13 +211,43 @@ class ScriptMatcher:
             previous_row = current_row
         
         return previous_row[-1]
+    
+    def validate_matched_words(self, matched_words: List[Dict], max_audio_duration: float) -> List[Dict]:
+        """
+        NEW: Validate that matched words don't extend beyond actual audio duration
+        
+        Args:
+            matched_words: List of matched word dictionaries
+            max_audio_duration: Maximum duration of actual audio content
+            
+        Returns:
+            Validated list with no words extending beyond audio
+        """
+        if not matched_words:
+            return matched_words
+        
+        validated_words = []
+        discarded_count = 0
+        
+        for word in matched_words:
+            word_end = word.get('end', 0)
+            if word_end <= max_audio_duration + 0.2:  # Small tolerance for timing imprecision
+                validated_words.append(word)
+            else:
+                discarded_count += 1
+                logger.debug(f"Discarded word '{word.get('text', '')}' ending at {word_end:.2f}s (beyond {max_audio_duration:.2f}s)")
+        
+        if discarded_count > 0:
+            logger.info(f"Validation: Discarded {discarded_count} words extending beyond audio duration")
+        
+        return validated_words
 
 class SimplifiedReelMakerApp:
-    """Simplified app with NO FADE EFFECTS + Reddit Integration + 3.5s Dead Air"""
+    """FIXED: Simplified app with NO FADE EFFECTS + Reddit Integration + 3.5s Dead Air (Script matching fixed)"""
     
     def __init__(self):
         """Initialize all processors"""
-        logger.info("Initializing Simplified Reel Maker Application - NO FADE EFFECTS + Reddit Integration + 3.5s Dead Air")
+        logger.info("Initializing Simplified Reel Maker Application - Script matching issues FIXED")
         
         try:
             self.audio_processor = AudioProcessor(model_size="base")
@@ -259,7 +312,7 @@ class SimplifiedReelMakerApp:
                                 vignette_strength: float,
                                 words_per_segment: int) -> Tuple[Optional[str], str]:
         """
-        FIXED: Process reel with title audio + reddit image + main story audio + 3.5s dead air
+        FIXED: Process reel with title audio + reddit image + main story audio + 3.5s dead air (script matching fixed)
         """
         try:
             # Cache management - clean up previous generation
@@ -273,7 +326,7 @@ class SimplifiedReelMakerApp:
             if reddit_image is None:
                 return None, "❌ Please generate a Reddit post image first"
             
-            logger.info("🎨 Starting Reddit-integrated reel processing with 3.5s dead air...")
+            logger.info("🎨 Starting Reddit-integrated reel processing with FIXED script matching...")
             
             # Step 1: Validate dual audio system
             status = "🎵 Validating dual audio system...\n"
@@ -305,38 +358,43 @@ class SimplifiedReelMakerApp:
             ending_silence = dual_audio_result['ending_silence']
             total_duration = dual_audio_result['total_duration']
             main_transcription = dual_audio_result['main_transcription']
+            audio_content_duration = dual_audio_result['audio_content_duration']  # NEW: Duration without dead air
             
             status += f"✅ Dual audio processed with ending silence:\n"
             status += f"   • Title: {title_duration:.2f}s\n"
             status += f"   • Delay: {delay_duration:.2f}s\n"
             status += f"   • Reddit Display: {reddit_display_duration:.2f}s\n"
             status += f"   • Main Story: {main_duration:.2f}s\n"
-            status += f"   • Audio Content Ends: {dual_audio_result['audio_content_duration']:.2f}s\n"
+            status += f"   • Audio Content Ends: {audio_content_duration:.2f}s\n"
             status += f"   • Ending Silence: {ending_silence:.2f}s\n"
             status += f"   • Total Duration: {total_duration:.2f}s\n"
             
-            # Log timing verification
-            logger.info(f"🕐 TIMING VERIFICATION:")
-            logger.info(f"  • Audio content duration: {dual_audio_result['audio_content_duration']:.2f}s")
-            logger.info(f"  • Dead air starts at: {dual_audio_result['dead_air_start']:.2f}s")
-            logger.info(f"  • Total video duration: {total_duration:.2f}s")
-            logger.info(f"  • Dead air duration: {ending_silence:.2f}s")
-            
-            # Step 3: Script Matching (if provided)
+            # Step 3: FIXED Script Matching (if provided)
             if original_script and original_script.strip():
-                status += "📝 Matching script to audio timing...\n"
+                status += "📝 Matching script to audio timing (FIXED - no dead air extensions)...\n"
                 
-                matched_words = self.script_matcher.match_script_to_timing(
+                # FIXED: Validate matched words against actual audio duration
+                raw_matched_words = self.script_matcher.match_script_to_timing(
                     original_script, main_transcription['words']
                 )
                 
-                main_transcription['words'] = matched_words
-                main_transcription['text'] = self._reconstruct_formatted_text(matched_words)
+                # CRITICAL: Validate that no words extend beyond actual audio content
+                validated_words = self.script_matcher.validate_matched_words(
+                    raw_matched_words, main_duration  # Use main_duration, not total_duration
+                )
                 
-                script_matched = sum(1 for w in matched_words if w.get('source') == 'script_matched')
-                total_words = len(matched_words)
+                main_transcription['words'] = validated_words
+                main_transcription['text'] = self._reconstruct_formatted_text(validated_words)
                 
-                status += f"✅ Script matching: {script_matched}/{total_words} words matched\n"
+                script_matched = sum(1 for w in validated_words if w.get('source') == 'script_matched')
+                total_words = len(validated_words)
+                discarded_words = len(raw_matched_words) - len(validated_words)
+                
+                status += f"✅ Script matching (FIXED): {script_matched}/{total_words} words matched\n"
+                if discarded_words > 0:
+                    status += f"   • {discarded_words} words discarded to prevent dead air text issues\n"
+                
+                logger.info(f"FIXED script matching: {total_words} final words, none extend beyond {main_duration:.2f}s")
             else:
                 status += "📝 Using Whisper transcription (no script provided)\n"
             
@@ -350,7 +408,7 @@ class SimplifiedReelMakerApp:
             status += "✅ Combined audio prepared with ending silence\n"
             
             # Step 5: Create text segments with offset timing and extended last segment
-            status += "📝 Creating text segments with extended last segment for dead air...\n"
+            status += "📝 Creating text segments with extended last segment for dead air (FIXED)...\n"
             
             self.text_synchronizer.words_per_display = words_per_segment
             text_segments = self.text_synchronizer.create_display_segments_with_offset_and_extended_end(
@@ -367,14 +425,24 @@ class SimplifiedReelMakerApp:
             if text_segments:
                 last_segment = text_segments[-1]
                 if last_segment.get('has_dead_air_extension', False):
-                    status += f"🔥 VERIFIED: Last text segment extended for dead air\n"
+                    status += f"🔥 VERIFIED: Last text segment extended for dead air (FIXED)\n"
                     status += f"   • Text: '{last_segment['text'][:40]}{'...' if len(last_segment['text']) > 40 else ''}'\n"
                     status += f"   • Will remain visible until: {last_segment['end']:.2f}s\n"
                     status += f"   • Dead air period: {last_segment.get('dead_air_start', 0):.2f}s - {total_duration:.2f}s\n"
+                    
+                    # VERIFICATION: Check that last segment doesn't contain script-estimated words
+                    last_words = main_transcription['words'][-5:] if main_transcription['words'] else []
+                    estimated_words = [w for w in last_words if w.get('source') == 'script_estimated']
+                    if estimated_words:
+                        logger.error(f"CRITICAL ERROR: Found {len(estimated_words)} estimated words near end!")
+                        for w in estimated_words:
+                            logger.error(f"Estimated word: '{w.get('text', '')}' at {w.get('end', 0):.2f}s")
+                    else:
+                        status += f"   ✅ No problematic estimated words detected\n"
                 else:
                     status += f"⚠️ WARNING: Last text segment NOT extended for dead air\n"
             
-            status += f"✅ Created {len(text_segments)} text segments with extended last segment\n"
+            status += f"✅ Created {len(text_segments)} text segments with extended last segment (FIXED)\n"
             
             # Step 6: Process background video for FULL duration including dead air
             status += f"🎬 Processing background video for full duration including dead air (vignette: {vignette_strength:.1f})...\n"
@@ -386,7 +454,7 @@ class SimplifiedReelMakerApp:
             status += "✅ Background video processed\n"
             
             # Step 7: Create text overlays
-            status += "✨ Creating text overlays with dead air support...\n"
+            status += "✨ Creating text overlays with dead air support (FIXED)...\n"
             
             style_config = {
                 'font_family': font_family,
@@ -396,12 +464,12 @@ class SimplifiedReelMakerApp:
                 'stroke_width': stroke_width,
                 'position': position,
                 'text_case': text_case,
-                'words_per_segment': words_per_segment  # ADDED: Pass words per segment for dynamic sizing
+                'words_per_segment': words_per_segment
             }
             
             text_overlays = self.video_processor.create_text_overlays(text_segments, style_config)
             
-            status += f"✅ Created {len(text_overlays)} text overlays\n"
+            status += f"✅ Created {len(text_overlays)} text overlays (FIXED)\n"
             
             # Step 8: Compose video with Reddit integration
             status += "🎭 Composing video with Reddit integration...\n"
@@ -435,7 +503,7 @@ class SimplifiedReelMakerApp:
                     final_duration = verify_frame_count / verify_fps if verify_fps > 0 else 0
                     verify_cap.release()
                     
-                    logger.info(f"🎬 FINAL VIDEO VERIFICATION:")
+                    logger.info(f"🎬 FINAL VIDEO VERIFICATION (FIXED):")
                     logger.info(f"  • Expected duration: {total_duration:.2f}s")
                     logger.info(f"  • Actual duration: {final_duration:.2f}s")
                     logger.info(f"  • Dead air period: {dual_audio_result['dead_air_start']:.2f}s - {total_duration:.2f}s")
@@ -456,7 +524,7 @@ class SimplifiedReelMakerApp:
                 matched_words = main_transcription['words']
                 script_matched = sum(1 for w in matched_words if w.get('source') == 'script_matched')
                 total_words = len(matched_words)
-                script_info = f"\n🎯 **Script Integration:**\n   • {script_matched}/{total_words} words matched\n   • Preserved original formatting and punctuation"
+                script_info = f"\n🎯 **Script Integration (FIXED):**\n   • {script_matched}/{total_words} words matched\n   • Preserved original formatting and punctuation\n   • ✅ No dead air text issues"
             
             # Get device info for status
             device_info = self.audio_processor.get_device_info()
@@ -465,7 +533,7 @@ class SimplifiedReelMakerApp:
                 device_status += f" ({device_info.get('gpu_name', 'GPU')})"
             
             final_status = status + f"""
-🎉 **Reddit-Style Reel Complete with 3.5s Dead Air!**
+🎉 **Reddit-Style Reel Complete with 3.5s Dead Air (SCRIPT MATCHING FIXED)!**
 
 📊 **Video Composition:**
 • **Reddit Phase:** {reddit_display_duration:.2f}s (title: {title_duration:.2f}s + delay: {delay_duration:.2f}s)
@@ -485,10 +553,11 @@ class SimplifiedReelMakerApp:
 • **Synchronization:** Perfect timing alignment
 • **Quality:** 128kbps AAC
 
-⏱️ **Dead Air Feature:**
+⏱️ **Dead Air Feature (FIXED):**
 • **Duration:** {ending_silence:.2f} seconds at the end
 • **Behavior:** Last text remains visible, background continues
 • **Purpose:** Reflection time for viewers
+• **✅ Script Matching:** No longer creates extra text during dead air
 
 {device_status}
 
@@ -497,10 +566,10 @@ class SimplifiedReelMakerApp:
 📝 **Story Preview:**
 {main_transcription['text'][:200]}{'...' if len(main_transcription['text']) > 200 else ''}
 
-✨ Your Reddit-integrated reel with dead air is ready for social media!
+✨ Your Reddit-integrated reel with FIXED dead air is ready for social media!
             """
             
-            logger.info("🎨 Reddit reel processing with dead air completed successfully")
+            logger.info("🎨 Reddit reel processing with FIXED script matching completed successfully")
             return final_video_path, final_status
             
         except Exception as e:
@@ -511,13 +580,14 @@ class SimplifiedReelMakerApp:
 2. **Reddit Image:** Generate Reddit post image first
 3. **Audio Quality:** Use clear audio files (MP3/WAV)
 4. **Video Format:** Use MP4 format for best compatibility
-5. **File Sizes:** Keep files under reasonable sizes
+5. **Script Matching:** If issues persist, try without original script
 
 📞 **Support Tips:**
 • Title audio: 0.5s - 30s duration
 • Main audio: 1s - 5 minutes duration  
 • Video: MP4 format recommended
 • Reddit image: Generate before creating reel
+• Script: Ensure script matches actual spoken content
 
 🔄 **Quick Fix:** Try generating Reddit post again and re-upload audio files
             """
@@ -671,7 +741,7 @@ def create_live_preview(font_family, font_size, text_color, stroke_color, stroke
             color: #90EE90;
             font-weight: bold;
             z-index: 10;
-        ">+3.5s dead air</div>
+        ">FIXED: No dead air text</div>
         
         <div style="
             position: absolute;
@@ -754,7 +824,7 @@ def clear_reddit_inputs():
     return "", "", None, "", "", False, False
 
 def create_interface() -> gr.Blocks:
-    """Create interface with NO FADE EFFECTS + Reddit Integration + 3.5s Dead Air + Fixed Dynamic Font Sizing"""
+    """Create interface with NO FADE EFFECTS + Reddit Integration + 3.5s Dead Air + FIXED Script Matching"""
     
     # Initialize the app
     app = SimplifiedReelMakerApp()
@@ -877,7 +947,7 @@ def create_interface() -> gr.Blocks:
     """
     
     with gr.Blocks(
-        title="Professional Reel Maker with Reddit Integration + Dead Air + Fixed Dynamic Font Sizing",
+        title="Professional Reel Maker - SCRIPT MATCHING FIXED",
         css=professional_css,
         theme=gr.themes.Base()
     ) as interface:
@@ -885,7 +955,7 @@ def create_interface() -> gr.Blocks:
         # Professional header
         gr.HTML("""
         <div class="main-header">
-            <h1>🎬 Professional Reel Maker + Reddit Integration + Dead Air</h1>
+            <h1>🎬 Professional Reel Maker + Reddit Integration (SCRIPT MATCHING FIXED)</h1>
             <p>Create engaging vertical videos with Reddit-style posts and AI-powered transcription</p>
             <div style="margin-top: 15px;">
                 <span style="background: linear-gradient(45deg, #667eea, #764ba2); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">🎨 Professional Grade</span>
@@ -893,7 +963,7 @@ def create_interface() -> gr.Blocks:
                 <span style="background: linear-gradient(45deg, #ff4500, #ff6500); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">🔥 Reddit Posts</span>
                 <span style="background: linear-gradient(45deg, #667eea, #764ba2); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">🎵 Dual Audio</span>
                 <span style="background: linear-gradient(45deg, #f093fb, #f5576c); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">⚡ INSTANT Display</span>
-                <span style="background: linear-gradient(45deg, #32cd32, #228b22); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">⏱️ 3.5s Dead Air</span>
+                <span style="background: linear-gradient(45deg, #32cd32, #228b22); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">✅ FIXED Dead Air</span>
                 <span style="background: linear-gradient(45deg, #ff6b35, #f7931e); color: white; padding: 6px 12px; border-radius: 20px; font-size: 12px; margin: 3px; font-weight: bold;">🔤 Dynamic Font Sizing</span>
             </div>
         </div>
@@ -1016,20 +1086,20 @@ def create_interface() -> gr.Blocks:
                             )
                         
                         # Script Input Section
-                        gr.HTML('<div class="section-header"><h3>📝 Original Script (Optional)</h3></div>')
+                        gr.HTML('<div class="section-header"><h3>📝 Original Script (Optional - FIXED)</h3></div>')
                         
                         with gr.Group(elem_classes="script-container"):
                             original_script = gr.Textbox(
-                                label="📄 Original Script/Transcript",
-                                placeholder="Paste your original script here for improved accuracy...\n\nExample:\nHello everyone, welcome to my channel!\nToday we're going to talk about AI technology.\nIt's absolutely fascinating how far we've come.\n\nNote: Lines starting with '-' (dialogue indicators) will be automatically removed.",
+                                label="📄 Original Script/Transcript (FIXED - No Dead Air Issues)",
+                                placeholder="Paste your original script here for improved accuracy...\n\nFIXED: Script matching now prevents text appearing during dead air!\n\nExample:\nHello everyone, welcome to my channel!\nToday we're going to talk about AI technology.\nIt's absolutely fascinating how far we've come.\n\nNote: Lines starting with '-' (dialogue indicators) will be automatically removed.\nOnly script words with actual Whisper timing will be used - no estimated extensions!",
                                 lines=6,
                                 value="",
-                                info="Optional: Provide the original script to improve text accuracy. Punctuation, capitalization, and formatting will be preserved!"
+                                info="FIXED: Script matching no longer creates extra text during the 3.5s dead air period!"
                             )
                         
                         # Professional Process button
                         process_btn = gr.Button(
-                            "🎬 Create Reddit Reel (Title + Story + 3.5s Dead Air)",
+                            "🎬 Create Reddit Reel (FIXED - No Dead Air Text Issues)",
                             variant="primary",
                             size="lg"
                         )
@@ -1037,14 +1107,14 @@ def create_interface() -> gr.Blocks:
                         # Performance info
                         gr.HTML("""
                         <div class="performance-info">
-                            <strong>🚀 Reddit Reel Features + 3.5s Dead Air + Dynamic Font Sizing</strong><br>
+                            <strong>🚀 Reddit Reel Features + FIXED Script Matching</strong><br>
                             🔥 Reddit post display during title • 🎵 Dual audio system • ⏱️ 1-second delay<br>
                             🎨 Live preview • 📱 9:16 aspect ratio • 🌅 Background vignette<br>
-                            🔤 Smart text wrapping • 🤖 AI transcription • 📝 Script matching<br>
+                            🔤 Smart text wrapping • 🤖 AI transcription • ✅ FIXED Script matching<br>
                             ⚡ INSTANT text display (NO fade effects) • 💓 Heartbeat animation (90% slower)<br>
-                            <strong>🔤 NEW: Dynamic font sizing for 1-5 words per segment</strong><br>
-                            <strong>📐 NEW: Permanent 10% margins to prevent text overflow</strong><br>
-                            <strong>⏱️ NEW: 3.5-second dead air at end with last text remaining visible</strong>
+                            <strong>🔤 Dynamic font sizing for 1-5 words per segment</strong><br>
+                            <strong>📐 Permanent 10% margins to prevent text overflow</strong><br>
+                            <strong>✅ FIXED: Script matching no longer creates text during dead air!</strong>
                         </div>
                         """)
                     
@@ -1053,7 +1123,7 @@ def create_interface() -> gr.Blocks:
                         
                         with gr.Group(elem_classes="controls-container"):
                             video_output = gr.Video(
-                                label="Reddit-Style Reel with Dead Air",
+                                label="Reddit-Style Reel with FIXED Dead Air",
                                 height=400,
                                 show_download_button=True
                             )
@@ -1066,7 +1136,7 @@ def create_interface() -> gr.Blocks:
             
             # TAB 3: STYLE & PREVIEW - All Controls with Live Preview
             with gr.TabItem("🎨 Style & Preview"):
-                gr.HTML('<div class="section-header"><h3>🎨 Text Styling with Live Preview (INSTANT DISPLAY + Dynamic Font Sizing + Dead Air)</h3></div>')
+                gr.HTML('<div class="section-header"><h3>🎨 Text Styling with Live Preview (INSTANT DISPLAY + Dynamic Font Sizing + FIXED Dead Air)</h3></div>')
                 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1155,7 +1225,7 @@ def create_interface() -> gr.Blocks:
                             )
                     
                     with gr.Column(scale=1):
-                        gr.HTML('<div class="section-header"><h3>👁️ Live Preview (INSTANT DISPLAY + Dynamic Font Sizing + Dead Air)</h3></div>')
+                        gr.HTML('<div class="section-header"><h3>👁️ Live Preview (INSTANT DISPLAY + Dynamic Font Sizing + FIXED Dead Air)</h3></div>')
                         
                         with gr.Group(elem_classes="preview-container"):
                             live_preview = gr.HTML(
@@ -1168,19 +1238,18 @@ def create_interface() -> gr.Blocks:
                             
                             gr.HTML("""
                             <div style="text-align: center; margin-top: 20px; color: #a0aec0; font-size: 14px;">
-                                <strong>🎯 Preview Features (INSTANT DISPLAY + Dynamic Font Sizing + Dead Air):</strong><br>
+                                <strong>🎯 Preview Features (FIXED SCRIPT MATCHING):</strong><br>
                                 • Real-time font changes with dynamic sizing<br>
                                 • Accurate 9:16 aspect ratio<br>
                                 • Live color updates<br>
                                 • Position preview<br>
                                 • Vignette effect preview<br>
                                 • Heartbeat animation (90% slower)<br>
-                                • <strong>NEW: Font automatically adjusts for 1-5 words</strong><br>
-                                • <strong>NEW: Permanent 10% margins maintained</strong><br>
+                                • <strong>Dynamic font automatically adjusts for 1-5 words</strong><br>
+                                • <strong>Permanent 10% margins maintained</strong><br>
                                 • <strong>NO FADE EFFECTS - Text appears instantly!</strong><br>
                                 • <strong>EXACTLY MATCHES FINAL OUTPUT!</strong><br>
-                                • <strong>FIXED: Proper outline (no duplication)!</strong><br>
-                                • <strong>NEW: 3.5s dead air with last text visible!</strong>
+                                • <strong>✅ FIXED: No text during dead air when using script!</strong>
                             </div>
                             """)
         
@@ -1247,7 +1316,7 @@ def create_interface() -> gr.Blocks:
 
 def main():
     """Main entry point"""
-    logger.info("🎬 Starting Professional Reel Maker with Reddit Integration + 3.5s Dead Air + Fixed Dynamic Font Sizing")
+    logger.info("🎬 Starting Professional Reel Maker with FIXED Script Matching")
     
     # Test OpenCV installation
     try:
